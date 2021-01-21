@@ -1,5 +1,5 @@
 import datetime
-from typing import Callable, Any, TypeVar, Dict
+from typing import Any
 from logging import getLogger
 import asyncio
 import pytz
@@ -18,9 +18,9 @@ class MongoDB(StoreObject):
     unique = False
     store_type = "CACHE"
 
-    def __init__(self, game: str, db: str, expirations: Any = None, log_level: int = 10, host='127.0.0.1', port=27017, **kwargs) -> None:
+    def __init__(self, game: str, db: str, expirations: Any = None, log_level: int = 10, data_type: bool = "pickle", host='127.0.0.1', port=27017, **kwargs) -> None:
         self._game = game
-        kwargs = {key.lower():val for (key,val) in kwargs.items()}
+        kwargs = {key.lower():val for (key, val) in kwargs.items()}
         if 'connect' not in kwargs:
             kwargs['connect'] = False
         if 'w' not in kwargs:
@@ -30,6 +30,9 @@ class MongoDB(StoreObject):
         self._db_name = db
         self._alias = f"{host}:{port}:{db}"
         self._manager = ExpirationManager(game, expirations)
+        if data_type not in {'pickle', 'bson'}:
+            raise ValueError("MongoDB data type should be one of: 'pickle', 'bson'")
+        self._data_type = data_type
         self._log_level = log_level
 
     async def connect(self):
@@ -56,10 +59,13 @@ class MongoDB(StoreObject):
         timeout = self._manager.get_timeout(token.method)
         if timeout != 0:
             await self.connect()
-            await self._cache[token.method].insert_one({'token': token.stringify, 'data': bytify(value), 'setAt': datetime.datetime.now(pytz.utc)})
+            if self._data_type == "pickle":
+                await self._cache[token.method].insert_one({'token': token.stringify, 'data': bytify(value), 'dataType': "pickle", 'setAt': datetime.datetime.now(pytz.utc)})
+            else: # bson
+                await self._cache[token.method].insert_one({'token': token.stringify, 'data': value, 'dataType': "bson", 'setAt': datetime.datetime.now(pytz.utc)})
             LOGGER.log(self._log_level, f"[Trace: {self._game.upper()} > MongoDB > {self._alias}] SET: {self._log_template(token)}")
 
-    async def get(self, token: PipelineToken, session = None) -> Any:
+    async def get(self, token: PipelineToken, session=None) -> Any:
         timeout = self._manager.get_timeout(token.method)
         if timeout == 0:
             raise NotFound
@@ -67,8 +73,13 @@ class MongoDB(StoreObject):
         item = await self._cache[token.method].find_one({'token': token.stringify})
         if item is None:
             raise NotFound
-        LOGGER.log(self._log_level, f"[Trace: {self._game.upper()} > MongoDB > {self._alias}] GET: {self._log_template(token)}")
-        return pytify(item["data"])
+        datatype = item.get("dataType", "pickle")
+        if self._data_type == datatype:
+            LOGGER.log(self._log_level, f"[Trace: {self._game.upper()} > MongoDB > {self._alias}] GET: {self._log_template(token)}")
+            if datatype == "pickle":
+                return pytify(item["data"])
+            return item["data"] # bson
+        raise NotFound
 
     async def delete(self, token: PipelineToken) -> None:
         await self.connect()
