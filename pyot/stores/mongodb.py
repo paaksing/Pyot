@@ -18,7 +18,7 @@ class MongoDB(StoreObject):
     unique = False
     store_type = "CACHE"
 
-    def __init__(self, game: str, db: str, expirations: Any = None, log_level: int = 10, data_type: bool = "pickle", host='127.0.0.1', port=27017, **kwargs) -> None:
+    def __init__(self, game: str, db: str, expirations: Any = None, log_level: int = 10, serialization: str = "bson", host='127.0.0.1', port=27017, **kwargs) -> None:
         self._game = game
         kwargs = {key.lower():val for (key, val) in kwargs.items()}
         if 'connect' not in kwargs:
@@ -30,9 +30,10 @@ class MongoDB(StoreObject):
         self._db_name = db
         self._alias = f"{host}:{port}:{db}"
         self._manager = ExpirationManager(game, expirations)
-        if data_type not in {'pickle', 'bson'}:
-            raise ValueError("MongoDB data type should be one of: 'pickle', 'bson'")
-        self._data_type = data_type
+        serialization = serialization.lower()
+        if serialization not in {'pickle', 'bson'}:
+            raise ValueError("MongoDB serialization type should be one of: 'pickle', 'bson'")
+        self._serialization = serialization
         self._log_level = log_level
 
     async def connect(self):
@@ -59,7 +60,7 @@ class MongoDB(StoreObject):
         timeout = self._manager.get_timeout(token.method)
         if timeout != 0:
             await self.connect()
-            if self._data_type == "pickle":
+            if self._serialization == "pickle":
                 await self._cache[token.method].insert_one({'token': token.stringify, 'data': bytify(value), 'dataType': "pickle", 'setAt': datetime.datetime.now(pytz.utc)})
             else: # bson
                 await self._cache[token.method].insert_one({'token': token.stringify, 'data': value, 'dataType': "bson", 'setAt': datetime.datetime.now(pytz.utc)})
@@ -74,11 +75,12 @@ class MongoDB(StoreObject):
         if item is None:
             raise NotFound
         datatype = item.get("dataType", "pickle")
-        if self._data_type == datatype:
+        if self._serialization == datatype:
             LOGGER.log(self._log_level, f"[Trace: {self._game.upper()} > MongoDB > {self._alias}] GET: {self._log_template(token)}")
             if datatype == "pickle":
                 return pytify(item["data"])
             return item["data"] # bson
+        await self._cache[token.method].delete_many({'token': token.stringify})
         raise NotFound
 
     async def delete(self, token: PipelineToken) -> None:
@@ -93,7 +95,6 @@ class MongoDB(StoreObject):
             return False
         return True
 
-    # RedisCLI > FLUSHALL
     async def clear(self):
         collections = await self._cache.list_collection_names()
         for name in collections:
